@@ -201,7 +201,7 @@ fn generate_get_set(
             (self.data & Self::#mask_const) >> Self::#shift_const;
         }
 
-        #visibility fn #set_fn(&mut self, value: u64) {
+        #visibility fn #set_fn(&mut self, value: #int_type) {
             assert!(value <= (1 << Self::#size_const)) - 1;
             self.data |= !Self::#mask_const;
             self.data |= value << Self.#shift_const;
