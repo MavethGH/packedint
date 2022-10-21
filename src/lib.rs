@@ -2,14 +2,15 @@ use std::num::NonZeroU32;
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
     braced,
-    parse::{Parse, ParseStream},
-    parse_macro_input, Data, DeriveInput, Field, Ident, LitInt, Token, Type, Visibility,
+    parse::{Parse, ParseBuffer, ParseStream},
+    parse_macro_input, Ident, LitInt, Token, Visibility,
 };
 
-enum StructSize {
+#[derive(Clone, Copy)]
+enum IntType {
     U8,
     U16,
     U32,
@@ -17,7 +18,7 @@ enum StructSize {
     U128,
 }
 
-impl Parse for StructSize {
+impl Parse for IntType {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let lit: LitInt = input.parse()?;
         let number = lit.base10_parse::<u32>()?;
@@ -35,6 +36,26 @@ impl Parse for StructSize {
     }
 }
 
+impl IntType {
+    pub fn as_u32(&self) -> u32 {
+        match self {
+            IntType::U8 => 8,
+            IntType::U16 => 16,
+            IntType::U32 => 32,
+            IntType::U64 => 64,
+            IntType::U128 => 128,
+        }
+    }
+}
+
+impl ToTokens for IntType {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        let token = format!("u{}", self.as_u32());
+        token.to_tokens(tokens);
+    }
+}
+
+#[derive(Clone)]
 struct StructField {
     visibility: Visibility,
     name: Ident,
@@ -72,7 +93,7 @@ impl Parse for StructField {
 struct PackedInt {
     visibility: Visibility,
     name: Ident,
-    struct_size: StructSize,
+    int_type: IntType,
     fields: Vec<StructField>,
 }
 
@@ -82,86 +103,87 @@ impl Parse for PackedInt {
         input.parse::<Token![struct]>()?;
         let name = input.parse()?;
         input.parse::<Token![:]>()?;
-        let struct_size = input.parse()?;
-        let content;
+        let struct_size: IntType = input.parse()?;
+
+        let content: ParseBuffer;
         let _ = braced!(content in input);
+
+        let mut total_bits = 0;
+        let fields = content
+            .parse_terminated::<_, Token![,]>(StructField::parse)?
+            .into_iter()
+            .map(|f| {
+                total_bits += f.bit_size.get();
+                f
+            })
+            .collect();
+
+        if total_bits > struct_size.as_u32() {
+            return Err(content.error("the size of the packed int is too small to hold its fields"));
+        }
+
         Ok(Self {
             visibility,
             name,
-            struct_size,
-            fields: content
-                .parse_terminated::<_, Token![,]>(StructField::parse)?
-                .into_iter()
-                .collect(),
+            int_type: struct_size,
+            fields,
         })
     }
 }
 
-#[proc_macro_derive(PackedU64, attributes(bits))]
-pub fn derive_packed_u64(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+#[proc_macro]
+pub fn packed_int(input: TokenStream) -> TokenStream {
+    let PackedInt {
+        visibility,
+        name,
+        int_type,
+        fields,
+    } = parse_macro_input!(input as PackedInt);
 
-    let name = input.ident;
-    let generics = input.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let impl_block = generate_impl_block(&input.data)
-        .map_err(syn::Error::into_compile_error)
-        .unwrap();
+    let mut total_bits = 0;
+    let mut field_fns = Vec::with_capacity(fields.len());
+
+    for field in &fields {
+        let fns = generate_get_set(field, total_bits, int_type)
+            .unwrap_or_else(syn::Error::into_compile_error);
+
+        field_fns.push(fns);
+        total_bits += field.bit_size.get();
+    }
+
+    if total_bits > int_type.as_u32() {}
+
+    let fns_iter = field_fns.iter();
+
+    // We don't need fields anymore, so we can use into_iter to avoid a lifetime parameter
+    // on generate_new_fn()
+    let new_fn = generate_new_fn(fields.into_iter(), &visibility, int_type);
 
     let output = quote! {
-        impl #impl_generics #name #ty_generics #where_clause {
-            #impl_block
+        #visibility struct #name {
+            data: #int_type,
         }
+
+        impl #name {
+            #(#fns_iter)*
+
+            #new_fn
+        }
+
     };
 
     output.into()
 }
 
-fn generate_impl_block(data: &Data) -> syn::Result<TokenStream2> {
-    match data {
-        Data::Struct(ref data) => match data.fields {
-            syn::Fields::Named(ref fields) => {
-                let mut fns = Vec::new();
-                let mut total_bits = 0;
-                for field in fields.named.iter() {
-                    for attr in &field.attrs {
-                        if attr.path.is_ident("bits") {
-                            let bits: BitsCount = syn::parse2(attr.tokens.clone())?;
-                            let bits_count = bits.bits_count.base10_parse::<u64>()?;
-                            let set_get_fns = generate_get_set(field, bits_count, total_bits)?;
-                            total_bits += bits_count;
-                            fns.push(set_get_fns);
-                            // We don't care about [bits=x] attributes after the first
-                            break;
-                        }
-                    }
-                }
-                assert_eq!(total_bits, 64);
-
-                let new_fn = generate_new_fn(fields.named.iter());
-                let fn_iter = fns.iter();
-
-                let impl_block = quote! {
-                    #(#fn_iter)*
-
-                    #new_fn
-                };
-
-                return Ok(impl_block);
-            }
-            // This macro doesn't work with tuple structs
-            syn::Fields::Unnamed(_) => unimplemented!(),
-            // If this is a unit struct, we don't need to do anything
-            // TODO: might be worth emitting a warning in this case
-            syn::Fields::Unit => Ok(TokenStream2::new()),
-        },
-        Data::Enum(_) | Data::Union(_) => unimplemented!(),
-    }
-}
-
-fn generate_get_set(field: &Field, size: u64, shift: u64) -> syn::Result<TokenStream2> {
-    let name = field.ident.as_ref().unwrap().to_string();
+fn generate_get_set(
+    field: &StructField,
+    shift: u32,
+    int_type: IntType,
+) -> syn::Result<TokenStream2> {
+    let name = field.name.to_string();
     let name_upper = name.as_str().to_uppercase();
+    let size = field.bit_size.get();
+    let visibility = &field.visibility;
 
     let size_const = format_ident!("{}_SIZE", name_upper);
     let shift_const = format_ident!("{}_SHIFT", name_upper);
@@ -171,15 +193,15 @@ fn generate_get_set(field: &Field, size: u64, shift: u64) -> syn::Result<TokenSt
     let set_fn = format_ident!("set_{}", name);
 
     let get_set = quote! {
-        const #size_const: u64 = #size;
-        const #shift_const: u64 = #shift;
-        const #mask_const: u64 = ((1 << Self::#size_const) - 1) << Self::#shift_const;
+        const #size_const: #int_type = #size;
+        const #shift_const: #int_type = #shift;
+        const #mask_const: #int_type = ((1 << Self::#size_const) - 1) << Self::#shift_const;
 
-        pub fn #get_fn(&self) -> u64 {
+        #visibility fn #get_fn(&self) -> #int_type {
             (self.data & Self::#mask_const) >> Self::#shift_const;
         }
 
-        pub fn #set_fn(&mut self, value: u64) {
+        #visibility fn #set_fn(&mut self, value: u64) {
             assert!(value <= (1 << Self::#size_const)) - 1;
             self.data |= !Self::#mask_const;
             self.data |= value << Self.#shift_const;
@@ -191,11 +213,12 @@ fn generate_get_set(field: &Field, size: u64, shift: u64) -> syn::Result<TokenSt
 
 // This is only called after we've made sure the bit counts are valid,
 // so it can't fail.
-fn generate_new_fn<'a>(fields: impl Iterator<Item = &'a Field>) -> TokenStream2 {
-    let field_name = fields
-        // Unrap can't fail here, since we've already used the ident elsewhere
-        .map(|f| f.ident.as_ref().unwrap())
-        .collect::<Vec<_>>();
+fn generate_new_fn(
+    fields: impl Iterator<Item = StructField>,
+    visibility: &Visibility,
+    int_type: IntType,
+) -> TokenStream2 {
+    let field_name = fields.map(|f| f.name).collect::<Vec<_>>();
 
     let set_fn_name = field_name
         .clone()
@@ -204,7 +227,7 @@ fn generate_new_fn<'a>(fields: impl Iterator<Item = &'a Field>) -> TokenStream2 
         .collect::<Vec<_>>();
 
     let new_fn = quote! {
-        pub fn new( #( #field_name: u64),* ) -> Self {
+        #visibility fn new( #( #field_name: #int_type),* ) -> Self {
             let mut this = Self { data: 0 };
             #( this.#set_fn_name(#field_name); )*,
             this
@@ -212,18 +235,4 @@ fn generate_new_fn<'a>(fields: impl Iterator<Item = &'a Field>) -> TokenStream2 
     };
 
     new_fn.into()
-}
-
-struct BitsCount {
-    _eq_token: Token![=],
-    pub bits_count: LitInt,
-}
-
-impl Parse for BitsCount {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        Ok(Self {
-            _eq_token: input.parse()?,
-            bits_count: input.parse()?,
-        })
-    }
 }
