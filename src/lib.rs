@@ -1,7 +1,101 @@
+use std::num::NonZeroU32;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse::Parse, parse_macro_input, Data, DeriveInput, Field, LitInt, Token};
+use syn::{
+    braced,
+    parse::{Parse, ParseStream},
+    parse_macro_input, Data, DeriveInput, Field, Ident, LitInt, Token, Type, Visibility,
+};
+
+enum StructSize {
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+}
+
+impl Parse for StructSize {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let lit: LitInt = input.parse()?;
+        let number = lit.base10_parse::<u32>()?;
+        match number {
+            8 => Ok(Self::U8),
+            16 => Ok(Self::U16),
+            32 => Ok(Self::U32),
+            64 => Ok(Self::U64),
+            128 => Ok(Self::U128),
+            _ => Err(syn::parse::Error::new(
+                lit.span(),
+                "size of packed int must be 8, 16, 32, 64, or 128",
+            )),
+        }
+    }
+}
+
+struct StructField {
+    visibility: Visibility,
+    name: Ident,
+    bit_size: NonZeroU32,
+}
+
+impl Parse for StructField {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let visibility = input.parse()?;
+        let name = input.parse()?;
+        let lit: LitInt = input.parse()?;
+        let bit_size = NonZeroU32::new(lit.base10_parse()?).ok_or_else(|| {
+            syn::parse::Error::new(
+                lit.span(),
+                "fields of a packed int struct cannot be 0 bits in size",
+            )
+        })?;
+        Ok(Self {
+            visibility,
+            name,
+            bit_size,
+        })
+    }
+}
+
+/// Syntax
+///
+///     packed_int! {
+///         $VISIBILITY struct $NAME: $STRUCT_SIZE {
+///             // Any number of fields as long as the total bits does not exceed $STRUCT_SIZE
+///             $FIELD_VISIBILITY $FIELD_NAME: $BIT_SIZE
+///         }
+///     };
+///
+struct PackedInt {
+    visibility: Visibility,
+    name: Ident,
+    struct_size: StructSize,
+    fields: Vec<StructField>,
+}
+
+impl Parse for PackedInt {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let visibility = input.parse()?;
+        input.parse::<Token![struct]>()?;
+        let name = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let struct_size = input.parse()?;
+        let content;
+        let _ = braced!(content in input);
+        Ok(Self {
+            visibility,
+            name,
+            struct_size,
+            fields: content
+                .parse_terminated::<_, Token![,]>(StructField::parse)?
+                .into_iter()
+                .collect(),
+        })
+    }
+}
 
 #[proc_macro_derive(PackedU64, attributes(bits))]
 pub fn derive_packed_u64(input: TokenStream) -> TokenStream {
@@ -99,6 +193,7 @@ fn generate_get_set(field: &Field, size: u64, shift: u64) -> syn::Result<TokenSt
 // so it can't fail.
 fn generate_new_fn<'a>(fields: impl Iterator<Item = &'a Field>) -> TokenStream2 {
     let field_name = fields
+        // Unrap can't fail here, since we've already used the ident elsewhere
         .map(|f| f.ident.as_ref().unwrap())
         .collect::<Vec<_>>();
 
