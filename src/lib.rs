@@ -1,8 +1,7 @@
-use std::num::NonZeroU32;
-
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote, ToTokens};
+use std::num::NonZeroU32;
 use syn::{
     braced,
     parse::{Parse, ParseBuffer, ParseStream},
@@ -66,6 +65,7 @@ impl Parse for StructField {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let visibility = input.parse()?;
         let name = input.parse()?;
+        input.parse::<Token![:]>()?;
         let lit: LitInt = input.parse()?;
         let bit_size = NonZeroU32::new(lit.base10_parse()?).ok_or_else(|| {
             syn::parse::Error::new(
