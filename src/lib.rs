@@ -49,8 +49,7 @@ impl IntType {
 
 impl ToTokens for IntType {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        let token = format!("u{}", self.as_u32());
-        token.to_tokens(tokens);
+        format_ident!("u{}", self.as_u32()).to_tokens(tokens)
     }
 }
 
@@ -198,13 +197,13 @@ fn generate_get_set(
         const #mask_const: #int_type = ((1 << Self::#size_const) - 1) << Self::#shift_const;
 
         #visibility fn #get_fn(&self) -> #int_type {
-            (self.data & Self::#mask_const) >> Self::#shift_const;
+            (self.data & Self::#mask_const) >> Self::#shift_const
         }
 
         #visibility fn #set_fn(&mut self, value: #int_type) {
-            assert!(value <= (1 << Self::#size_const)) - 1;
-            self.data |= !Self::#mask_const;
-            self.data |= value << Self.#shift_const;
+            assert!(value <= (1 << Self::#size_const) - 1);
+            self.data &= !Self::#mask_const;
+            self.data |= value << Self::#shift_const;
         }
     };
 
@@ -229,7 +228,7 @@ fn generate_new_fn(
     let new_fn = quote! {
         #visibility fn new( #( #field_name: #int_type),* ) -> Self {
             let mut this = Self { data: 0 };
-            #( this.#set_fn_name(#field_name); )*,
+            #( this.#set_fn_name(#field_name); )*
             this
         }
     };
