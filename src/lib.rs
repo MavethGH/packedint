@@ -142,15 +142,13 @@ pub fn packed_int(input: TokenStream) -> TokenStream {
     let mut total_bits = 0;
     let mut field_fns = Vec::with_capacity(fields.len());
 
-    for field in &fields {
+    for field in fields.iter().rev() {
         let fns = generate_get_set(field, total_bits, int_type)
             .unwrap_or_else(syn::Error::into_compile_error);
 
         field_fns.push(fns);
         total_bits += field.bit_size.get();
     }
-
-    if total_bits > int_type.as_u32() {}
 
     let fns_iter = field_fns.iter();
 
