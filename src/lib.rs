@@ -156,9 +156,8 @@ pub fn packed_int(input: TokenStream) -> TokenStream {
     // on generate_new_fn()
     let new_fn = generate_new_fn(fields.into_iter(), &visibility, int_type);
 
-    let trait_impls = generate_trait_impls(name.clone());
-
     let output = quote! {
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
         #visibility struct #name {
             data: #int_type,
         }
@@ -168,9 +167,6 @@ pub fn packed_int(input: TokenStream) -> TokenStream {
 
             #new_fn
         }
-
-        #trait_impls
-
     };
 
     output.into()
@@ -236,35 +232,4 @@ fn generate_new_fn(
     };
 
     new_fn.into()
-}
-
-fn generate_trait_impls(name: Ident) -> TokenStream2 {
-    quote! {
-        impl ::std::cmp::PartialEq for #name {
-            fn eq(&self, other: &Self) -> bool {
-                self.data == other.data
-            }
-        }
-
-        impl ::std::cmp::Eq for #name {}
-
-        impl ::std::cmp::Ord for #name {
-            fn cmp(&self, other: &Self) -> ::std::cmp::Ordering {
-                self.data.cmp(&other.data)
-            }
-        }
-
-        impl ::std::cmp::PartialOrd for #name {
-            fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-
-        impl Clone for #name {
-            fn clone(&self) -> Self {
-                Self { data: self.data }
-            }
-        }
-    }
-    .into()
 }
