@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
 use std::num::NonZeroU32;
 use syn::{
@@ -118,7 +118,10 @@ impl Parse for PackedInt {
             .collect();
 
         if total_bits > struct_size.as_u32() {
-            return Err(content.error("the size of the packed int is too small to hold its fields"));
+            return Err(syn::parse::Error::new(
+                Span::call_site(),
+                "the size of the packed int is too small to hold its fields",
+            ));
         }
 
         Ok(Self {
@@ -143,9 +146,7 @@ pub fn packed_int(input: TokenStream) -> TokenStream {
     let mut field_fns = Vec::with_capacity(fields.len());
 
     for field in fields.iter().rev() {
-        let fns = generate_get_set(field, total_bits, int_type)
-            .unwrap_or_else(syn::Error::into_compile_error);
-
+        let fns = generate_get_set(field, total_bits, int_type);
         field_fns.push(fns);
         total_bits += field.bit_size.get();
     }
@@ -172,11 +173,7 @@ pub fn packed_int(input: TokenStream) -> TokenStream {
     output.into()
 }
 
-fn generate_get_set(
-    field: &StructField,
-    shift: u32,
-    int_type: IntType,
-) -> syn::Result<TokenStream2> {
+fn generate_get_set(field: &StructField, shift: u32, int_type: IntType) -> TokenStream2 {
     let name = field.name.to_string();
     let name_upper = name.as_str().to_uppercase();
     let size = field.bit_size.get();
@@ -205,7 +202,7 @@ fn generate_get_set(
         }
     };
 
-    Ok(get_set)
+    get_set
 }
 
 // This is only called after we've made sure the bit counts are valid,
